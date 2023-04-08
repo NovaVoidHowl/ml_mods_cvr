@@ -77,6 +77,6 @@
     </PreBuildEvent>
   </PropertyGroup>
   <PropertyGroup>
-    <PostBuildEvent>copy /y "$(TargetPath)" "D:\Games\Steam\steamapps\common\ChilloutVR\Mods\"</PostBuildEvent>
+    <PostBuildEvent>copy /y "$(TargetPath)" "$(CVRPATH)\Mods\"</PostBuildEvent>
   </PropertyGroup>
 </Project>

@@ -1,4 +1,5 @@
 ﻿using ABI_RC.Core.Player;
+using ABI_RC.Core.Savior;
 using ABI_RC.Systems.IK;
 using ABI_RC.Systems.IK.SubSystems;
 using ABI_RC.Systems.MovementSystem;
@@ -37,6 +38,7 @@ namespace ml_amt
         Transform m_avatarHips = null;
         float m_viewPointHeight = 1f;
         bool m_inVR = false;
+        bool m_fbtAnimations = true;
 
         bool m_avatarReady = false;
         bool m_compatibleAvatar = false;
@@ -93,6 +95,9 @@ namespace ml_amt
             Settings.FollowHipsChange += this.SetFollowHips;
             Settings.MassCenterChange += this.OnMassCenterChange;
             Settings.ScaledStepsChange += this.OnScaledStepsChange;
+
+            m_fbtAnimations = MetaPort.Instance.settings.GetSettingsBool("GeneralEnableRunningAnimationFullBody");
+            MetaPort.Instance.settings.settingBoolChanged.AddListener(this.OnGameSettingBoolChange);
         }
 
         void OnDestroy()
@@ -108,6 +113,8 @@ namespace ml_amt
             Settings.DetectEmotesChange -= this.SetDetectEmotes;
             Settings.FollowHipsChange -= this.SetFollowHips;
             Settings.MassCenterChange -= this.OnMassCenterChange;
+
+            MetaPort.Instance.settings.settingBoolChanged.RemoveListener(this.OnGameSettingBoolChange);
         }
 
         void Update()
@@ -119,7 +126,7 @@ namespace ml_amt
                 m_moving = !Mathf.Approximately(MovementSystem.Instance.movementVector.magnitude, 0f);
 
                 // Update upright
-                Matrix4x4 l_hmdMatrix = PlayerSetup.Instance.transform.GetMatrix().inverse * (m_inVR ? PlayerSetup.Instance.vrHeadTracker.transform.GetMatrix() : PlayerSetup.Instance.desktopCameraRig.transform.GetMatrix());
+                Matrix4x4 l_hmdMatrix = PlayerSetup.Instance.transform.GetMatrix().inverse * PlayerSetup.Instance.GetActiveCamera().transform.GetMatrix();
                 float l_currentHeight = Mathf.Clamp((l_hmdMatrix * ms_pointVector).y, 0f, float.MaxValue);
                 float l_avatarViewHeight = Mathf.Clamp(m_viewPointHeight * GetRelativeScale(), 0f, float.MaxValue);
                 m_upright = Mathf.Clamp01((l_avatarViewHeight > 0f) ? (l_currentHeight / l_avatarViewHeight) : 0f);
@@ -147,8 +154,8 @@ namespace ml_amt
 
                     if(m_poseTransitions)
                     {
-                        PlayerSetup.Instance.animatorManager.SetAnimatorParameterBool("Crouching", (m_poseState == PoseState.Crouching) && !m_compatibleAvatar && !BodySystem.isCalibratedAsFullBody);
-                        PlayerSetup.Instance.animatorManager.SetAnimatorParameterBool("Prone", (m_poseState == PoseState.Proning) && !m_compatibleAvatar && !BodySystem.isCalibratedAsFullBody);
+                        PlayerSetup.Instance.animatorManager.SetAnimatorParameterBool("Crouching", (m_poseState == PoseState.Crouching) && !m_compatibleAvatar && (!BodySystem.isCalibratedAsFullBody || m_fbtAnimations));
+                        PlayerSetup.Instance.animatorManager.SetAnimatorParameterBool("Prone", (m_poseState == PoseState.Proning) && !m_compatibleAvatar && (!BodySystem.isCalibratedAsFullBody || m_fbtAnimations));
                     }
                 }
 
@@ -201,28 +208,12 @@ namespace ml_amt
             m_viewPointHeight = PlayerSetup.Instance._avatar.GetComponent<ABI.CCK.Components.CVRAvatar>().viewPosition.y;
 
             // Parse animator parameters
-            AnimatorControllerParameter[] l_params = PlayerSetup.Instance._animator.parameters;
-            foreach(var l_param in l_params)
-            {
-                foreach(AvatarParameter.ParameterType l_enumParam in System.Enum.GetValues(typeof(AvatarParameter.ParameterType)))
-                {
-                    if(l_param.name.Contains(l_enumParam.ToString()) && (m_parameters.FindIndex(p => p.m_type == l_enumParam) == -1))
-                    {
-                        bool l_local = (l_param.name[0] == '#');
+            m_parameters.Add(new AvatarParameter(AvatarParameter.ParameterType.Upright, PlayerSetup.Instance.animatorManager));
+            m_parameters.Add(new AvatarParameter(AvatarParameter.ParameterType.GroundedRaw, PlayerSetup.Instance.animatorManager));
+            m_parameters.Add(new AvatarParameter(AvatarParameter.ParameterType.Moving, PlayerSetup.Instance.animatorManager));
+            m_parameters.RemoveAll(p => !p.IsValid());
 
-                        m_parameters.Add(new AvatarParameter(
-                            l_enumParam,
-                            l_param.name,
-                            (l_local ? AvatarParameter.ParameterSyncType.Local : AvatarParameter.ParameterSyncType.Synced),
-                            (l_local ? l_param.nameHash : 0)
-                        ));
-
-                        break;
-                    }
-                }
-            }
-
-            m_compatibleAvatar = m_parameters.Exists(p => p.m_type == AvatarParameter.ParameterType.Upright);
+            m_compatibleAvatar = m_parameters.Exists(p => (p.GetParameterType() == AvatarParameter.ParameterType.Upright));
             m_avatarScale = Mathf.Abs(PlayerSetup.Instance._avatar.transform.localScale.y);
 
             Transform l_customTransform = PlayerSetup.Instance._avatar.transform.Find("CrouchLimit");
@@ -439,6 +430,13 @@ namespace ml_amt
                     m_vrIk.solver.locomotion.heelHeight.keys = Utils.GetSineKeyframes(0.03f);
                 }
             }
+        }
+
+        // Game settings
+        void OnGameSettingBoolChange(string p_name, bool p_state)
+        {
+            if(p_name == "GeneralEnableRunningAnimationFullBody")
+                m_fbtAnimations = p_state;
         }
 
         // Arbitrary

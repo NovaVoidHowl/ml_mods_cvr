@@ -1,15 +1,21 @@
-﻿using ABI_RC.Core.InteractionSystem;
+﻿using ABI.CCK.Components;
+using ABI_RC.Core.InteractionSystem;
 using ABI_RC.Core.Player;
+using ABI_RC.Systems.IK.SubSystems;
 using ABI_RC.Systems.MovementSystem;
 using RootMotion.Dynamics;
 using RootMotion.FinalIK;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
 namespace ml_prm
 {
-    class RagdollController : MonoBehaviour
+    [DisallowMultipleComponent]
+    public class RagdollController : MonoBehaviour
     {
+        public static RagdollController Instance { get; private set; } = null;
+
         VRIK m_vrIK = null;
         float m_vrIkWeight = 1f;
 
@@ -20,18 +26,32 @@ namespace ml_prm
         Transform m_puppetRoot = null;
         Transform m_puppet = null;
         BipedRagdollReferences m_puppetReferences;
-        BipedRagdollReferences m_avatarReferences;
         readonly List<System.Tuple<Transform, Transform>> m_boneLinks = null;
 
         bool m_avatarReady = false;
         Vector3 m_lastPosition = Vector3.zero;
         Vector3 m_velocity = Vector3.zero;
 
+        RagdollToggle m_avatarRagdollToggle = null;
+        RagdollTrigger m_customTrigger = null;
+        AvatarBoolParameter m_ragdolledParameter = null;
+
+        bool m_reachedGround = true;
+        float m_downTime = float.MinValue;
+
         internal RagdollController()
         {
+            if(Instance == null)
+                Instance = this;
+
             m_rigidBodies = new List<Rigidbody>();
             m_colliders = new List<Collider>();
             m_boneLinks = new List<System.Tuple<Transform, Transform>>();
+        }
+        ~RagdollController()
+        {
+            if(Instance == this)
+                Instance = null;
         }
 
         // Unity events
@@ -42,12 +62,26 @@ namespace ml_prm
             m_puppetRoot.localPosition = Vector3.zero;
             m_puppetRoot.localRotation = Quaternion.identity;
 
+            m_customTrigger = MovementSystem.Instance.proxyCollider.gameObject.AddComponent<RagdollTrigger>();
+
             Settings.SwitchChange += this.SwitchRagdoll;
+            Settings.MovementDragChange += this.OnMovementDragChange;
+            Settings.AngularDragChange += this.OnAngularDragChange;
+            Settings.GravityChange += this.OnGravityChange;
         }
 
         void OnDestroy()
         {
+            if(m_customTrigger != null)
+            {
+                Object.Destroy(m_customTrigger);
+                m_customTrigger = null;
+            }
+
             Settings.SwitchChange -= this.SwitchRagdoll;
+            Settings.MovementDragChange -= this.OnMovementDragChange;
+            Settings.AngularDragChange -= this.OnAngularDragChange;
+            Settings.GravityChange -= this.OnGravityChange;
         }
 
         void Update()
@@ -56,7 +90,29 @@ namespace ml_prm
             m_velocity = (m_velocity + (l_pos - m_lastPosition) / Time.deltaTime) * 0.5f;
             m_lastPosition = l_pos;
 
+            if(m_avatarReady && !m_reachedGround && MovementSystem.Instance.IsGrounded())
+                m_reachedGround = true;
+
+            if(m_enabled && m_avatarReady && BodySystem.isCalibratedAsFullBody)
+                BodySystem.TrackingPositionWeight = 0f;
+
+            if(m_avatarReady && m_enabled && Settings.AutoRecover)
+            {
+                m_downTime += Time.deltaTime;
+                if(m_downTime >= Settings.RecoverDelay)
+                {
+                    SwitchRagdoll();
+                    m_downTime = float.MinValue; // One attepmt to recover
+                }
+            }
+
             if(Settings.Hotkey && Input.GetKeyDown(KeyCode.R) && !ViewManager.Instance.isGameMenuOpen())
+                SwitchRagdoll();
+
+            if((m_avatarRagdollToggle != null) && m_avatarRagdollToggle.isActiveAndEnabled && m_avatarRagdollToggle.shouldOverride && (m_enabled != m_avatarRagdollToggle.isOn))
+                SwitchRagdoll();
+
+            if((m_customTrigger != null) && m_customTrigger.GetStateWithReset() && !m_enabled && m_avatarReady && Settings.PointersReaction)
                 SwitchRagdoll();
         }
 
@@ -64,6 +120,9 @@ namespace ml_prm
         {
             if(m_enabled && m_avatarReady)
             {
+                if(BodySystem.isCalibratedAsFullBody)
+                    BodySystem.TrackingPositionWeight = 0f;
+
                 foreach(var l_link in m_boneLinks)
                     l_link.Item1.CopyGlobal(l_link.Item2);
             }
@@ -82,18 +141,21 @@ namespace ml_prm
             m_vrIK = null;
             m_enabled = false;
             m_avatarReady = false;
+            m_avatarRagdollToggle = null;
+            m_ragdolledParameter = null;
             m_rigidBodies.Clear();
             m_colliders.Clear();
-            m_avatarReferences = new BipedRagdollReferences();
             m_puppetReferences = new BipedRagdollReferences();
             m_boneLinks.Clear();
+            m_reachedGround = true;
+            m_downTime = float.MinValue;
         }
 
         internal void OnAvatarSetup()
         {
             if(PlayerSetup.Instance._animator.isHuman)
             {
-                m_avatarReferences = BipedRagdollReferences.FromAvatar(PlayerSetup.Instance._animator);
+                BipedRagdollReferences l_avatarReferences = BipedRagdollReferences.FromAvatar(PlayerSetup.Instance._animator);
 
                 m_puppet = new GameObject("Root").transform;
                 m_puppet.parent = m_puppetRoot;
@@ -101,36 +163,44 @@ namespace ml_prm
                 m_puppet.localRotation = Quaternion.identity;
 
                 m_puppetReferences.root = m_puppet;
-                m_puppetReferences.hips = CloneTransform(m_avatarReferences.hips, m_puppetReferences.root, "Hips");
-                m_puppetReferences.spine = CloneTransform(m_avatarReferences.spine, m_puppetReferences.hips, "Spine");
+                m_puppetReferences.hips = CloneTransform(l_avatarReferences.hips, m_puppetReferences.root, "Hips");
+                m_puppetReferences.spine = CloneTransform(l_avatarReferences.spine, m_puppetReferences.hips, "Spine");
 
-                if(m_avatarReferences.chest != null)
-                    m_puppetReferences.chest = CloneTransform(m_avatarReferences.chest, m_puppetReferences.spine, "Chest");
+                if(l_avatarReferences.chest != null)
+                    m_puppetReferences.chest = CloneTransform(l_avatarReferences.chest, m_puppetReferences.spine, "Chest");
 
-                m_puppetReferences.head = CloneTransform(m_avatarReferences.head, (m_puppetReferences.chest != null) ? m_puppetReferences.chest : m_puppetReferences.spine, "Head");
+                m_puppetReferences.head = CloneTransform(l_avatarReferences.head, (m_puppetReferences.chest != null) ? m_puppetReferences.chest : m_puppetReferences.spine, "Head");
 
-                m_puppetReferences.leftUpperArm = CloneTransform(m_avatarReferences.leftUpperArm, (m_puppetReferences.chest != null) ? m_puppetReferences.chest : m_puppetReferences.spine, "LeftUpperArm");
-                m_puppetReferences.leftLowerArm = CloneTransform(m_avatarReferences.leftLowerArm, m_puppetReferences.leftUpperArm, "LeftLowerArm");
-                m_puppetReferences.leftHand = CloneTransform(m_avatarReferences.leftHand, m_puppetReferences.leftLowerArm, "LeftHand");
+                m_puppetReferences.leftUpperArm = CloneTransform(l_avatarReferences.leftUpperArm, (m_puppetReferences.chest != null) ? m_puppetReferences.chest : m_puppetReferences.spine, "LeftUpperArm");
+                m_puppetReferences.leftLowerArm = CloneTransform(l_avatarReferences.leftLowerArm, m_puppetReferences.leftUpperArm, "LeftLowerArm");
+                m_puppetReferences.leftHand = CloneTransform(l_avatarReferences.leftHand, m_puppetReferences.leftLowerArm, "LeftHand");
 
-                m_puppetReferences.rightUpperArm = CloneTransform(m_avatarReferences.rightUpperArm, (m_puppetReferences.chest != null) ? m_puppetReferences.chest : m_puppetReferences.spine, "RightUpperArm");
-                m_puppetReferences.rightLowerArm = CloneTransform(m_avatarReferences.rightLowerArm, m_puppetReferences.rightUpperArm, "RightLowerArm");
-                m_puppetReferences.rightHand = CloneTransform(m_avatarReferences.rightHand, m_puppetReferences.rightLowerArm, "RightHand");
+                m_puppetReferences.rightUpperArm = CloneTransform(l_avatarReferences.rightUpperArm, (m_puppetReferences.chest != null) ? m_puppetReferences.chest : m_puppetReferences.spine, "RightUpperArm");
+                m_puppetReferences.rightLowerArm = CloneTransform(l_avatarReferences.rightLowerArm, m_puppetReferences.rightUpperArm, "RightLowerArm");
+                m_puppetReferences.rightHand = CloneTransform(l_avatarReferences.rightHand, m_puppetReferences.rightLowerArm, "RightHand");
 
-                m_puppetReferences.leftUpperLeg = CloneTransform(m_avatarReferences.leftUpperLeg, m_puppetReferences.hips, "LeftUpperLeg");
-                m_puppetReferences.leftLowerLeg = CloneTransform(m_avatarReferences.leftLowerLeg, m_puppetReferences.leftUpperLeg, "LeftLowerLeg");
-                m_puppetReferences.leftFoot = CloneTransform(m_avatarReferences.leftFoot, m_puppetReferences.leftLowerLeg, "LeftFoot");
+                m_puppetReferences.leftUpperLeg = CloneTransform(l_avatarReferences.leftUpperLeg, m_puppetReferences.hips, "LeftUpperLeg");
+                m_puppetReferences.leftLowerLeg = CloneTransform(l_avatarReferences.leftLowerLeg, m_puppetReferences.leftUpperLeg, "LeftLowerLeg");
+                m_puppetReferences.leftFoot = CloneTransform(l_avatarReferences.leftFoot, m_puppetReferences.leftLowerLeg, "LeftFoot");
 
-                m_puppetReferences.rightUpperLeg = CloneTransform(m_avatarReferences.rightUpperLeg, m_puppetReferences.hips, "RightUpperLeg");
-                m_puppetReferences.rightLowerLeg = CloneTransform(m_avatarReferences.rightLowerLeg, m_puppetReferences.rightUpperLeg, "RightLowerLeg");
-                m_puppetReferences.rightFoot = CloneTransform(m_avatarReferences.rightFoot, m_puppetReferences.rightLowerLeg, "RightFoot");
+                m_puppetReferences.rightUpperLeg = CloneTransform(l_avatarReferences.rightUpperLeg, m_puppetReferences.hips, "RightUpperLeg");
+                m_puppetReferences.rightLowerLeg = CloneTransform(l_avatarReferences.rightLowerLeg, m_puppetReferences.rightUpperLeg, "RightLowerLeg");
+                m_puppetReferences.rightFoot = CloneTransform(l_avatarReferences.rightFoot, m_puppetReferences.rightLowerLeg, "RightFoot");
+
+                // Move to world origin to overcome possible issues, maybe?
+                m_puppetRoot.position = Vector3.zero;
+                m_puppetRoot.rotation = Quaternion.identity;
 
                 BipedRagdollCreator.Options l_options = BipedRagdollCreator.AutodetectOptions(m_puppetReferences);
                 l_options.joints = RagdollCreator.JointType.Character;
                 BipedRagdollCreator.Create(m_puppetReferences, l_options);
 
+                // And return back
+                m_puppetRoot.localPosition = Vector3.zero;
+                m_puppetRoot.localRotation = Quaternion.identity;
+
                 Transform[] l_puppetTransforms = m_puppetReferences.GetRagdollTransforms();
-                Transform[] l_avatarTransforms = m_avatarReferences.GetRagdollTransforms();
+                Transform[] l_avatarTransforms = l_avatarReferences.GetRagdollTransforms();
                 for(int i = 0; i < l_puppetTransforms.Length; i++)
                 {
                     if(l_puppetTransforms[i] != null)
@@ -140,8 +210,9 @@ namespace ml_prm
                         {
                             m_rigidBodies.Add(l_body);
                             l_body.isKinematic = true;
-                            l_body.angularDrag = 0.5f;
-                            l_body.drag = 1.0f;
+                            l_body.angularDrag = Settings.AngularDrag;
+                            l_body.drag = Settings.MovementDrag;
+                            l_body.useGravity = (!Utils.IsWorldSafe() || Settings.Gravity);
                             l_body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
                         }
 
@@ -155,7 +226,9 @@ namespace ml_prm
                         Collider l_collider = l_puppetTransforms[i].GetComponent<Collider>();
                         if(l_collider != null)
                         {
-                            Physics.IgnoreCollision(MovementSystem.Instance.proxyCollider, l_collider, true);
+                            Physics.IgnoreCollision(l_collider, MovementSystem.Instance.proxyCollider, true);
+                            Physics.IgnoreCollision(l_collider, MovementSystem.Instance.controller, true);
+                            Physics.IgnoreCollision(l_collider, MovementSystem.Instance.forceCollider, true);
                             l_collider.enabled = false;
                             m_colliders.Add(l_collider);
                         }
@@ -172,6 +245,9 @@ namespace ml_prm
                     m_vrIK.onPostSolverUpdate.AddListener(this.OnIKPostUpdate);
                 }
 
+                m_avatarRagdollToggle = PlayerSetup.Instance._avatar.GetComponentInChildren<RagdollToggle>(true);
+                m_ragdolledParameter = new AvatarBoolParameter("Ragdolled", PlayerSetup.Instance.animatorManager);
+
                 m_avatarReady = true;
             }
         }
@@ -179,6 +255,30 @@ namespace ml_prm
         internal void OnSeatSitDown(CVRSeat p_seat)
         {
             if(m_enabled && m_avatarReady && !p_seat.occupied)
+                SwitchRagdoll();
+        }
+
+        internal void OnStartCalibration()
+        {
+            if(m_enabled && m_avatarReady)
+                SwitchRagdoll();
+        }
+
+        internal void OnWorldSpawn()
+        {
+            if(m_enabled && m_avatarReady)
+                SwitchRagdoll();
+
+            if(m_avatarReady)
+            {
+                foreach(Rigidbody l_body in m_rigidBodies)
+                    l_body.useGravity = (!Utils.IsWorldSafe() || Settings.Gravity);
+            }
+        }
+
+        internal void OnCombatDown()
+        {
+            if(!m_enabled && m_avatarReady && Settings.CombatReaction)
                 SwitchRagdoll();
         }
 
@@ -197,46 +297,134 @@ namespace ml_prm
                 m_vrIK.solver.IKPositionWeight = m_vrIkWeight;
         }
 
+        // Settings
+        void OnMovementDragChange(float p_value)
+        {
+            if(m_avatarReady)
+            {
+                foreach(Rigidbody l_body in m_rigidBodies)
+                {
+                    l_body.drag = p_value;
+                    if(m_enabled)
+                        l_body.WakeUp();
+                }
+            }
+        }
+        void OnAngularDragChange(float p_value)
+        {
+            if(m_avatarReady)
+            {
+                foreach(Rigidbody l_body in m_rigidBodies)
+                {
+                    l_body.angularDrag = p_value;
+                    if(m_enabled)
+                        l_body.WakeUp();
+                }
+            }
+        }
+        void OnGravityChange(bool p_state)
+        {
+            if(m_avatarReady)
+            {
+                foreach(Rigidbody l_body in m_rigidBodies)
+                    l_body.useGravity = (!Utils.IsWorldSafe() || p_state);
+            }
+        }
+
         // Arbitrary
         public void SwitchRagdoll()
         {
-            if(m_avatarReady && (MovementSystem.Instance.lastSeat == null))
+            if(m_avatarReady)
             {
-                m_enabled = !m_enabled;
-
-                MovementSystem.Instance.SetImmobilized(m_enabled);
-
-                if(m_enabled)
+                if(!m_enabled)
                 {
-                    foreach(var l_link in m_boneLinks)
-                        l_link.Item2.CopyGlobal(l_link.Item1);
-
-                    foreach(Rigidbody l_body in m_rigidBodies)
-                        l_body.isKinematic = false;
-
-                    Vector3 l_velocity = m_velocity * Settings.Multiplier;
-                    foreach(Rigidbody l_body in m_rigidBodies)
+                    if(IsSafeToRagdoll() && m_reachedGround)
                     {
-                        l_body.velocity = l_velocity;
-                        l_body.angularVelocity = Vector3.zero;
+                        // Eject player from seat
+                        if(MovementSystem.Instance.lastSeat != null)
+                        {
+                            Vector3 l_pos = PlayerSetup.Instance.transform.position;
+                            Quaternion l_rot = PlayerSetup.Instance.transform.rotation;
+                            MovementSystem.Instance.lastSeat.ExitSeat();
+                            PlayerSetup.Instance.transform.position = l_pos;
+                            PlayerSetup.Instance.transform.rotation = Quaternion.Euler(0f, l_rot.eulerAngles.y, 0f);
+                        }
+
+                        MovementSystem.Instance.SetImmobilized(true);
+                        PlayerSetup.Instance.animatorManager.SetAnimatorParameterTrigger("CancelEmote");
+                        m_ragdolledParameter.SetValue(true);
+                        if(BodySystem.isCalibratedAsFullBody)
+                            BodySystem.TrackingPositionWeight = 0f;
+
+                        if(!Utils.IsWorldSafe())
+                            m_reachedGround = false; // Force player to unragdoll and reach ground first
+
+                        // Copy before set to non-kinematic to reduce stacked forces
+                        foreach(var l_link in m_boneLinks)
+                            l_link.Item2.CopyGlobal(l_link.Item1);
+
+                        foreach(Rigidbody l_body in m_rigidBodies)
+                            l_body.isKinematic = false;
+
+                        Vector3 l_velocity = m_velocity * Mathf.Clamp(Settings.VelocityMultiplier, 1f, (Utils.IsWorldSafe() ? Utils.GetWorldFlyMultiplier() : 1f));
+
+                        foreach(Rigidbody l_body in m_rigidBodies)
+                        {
+                            l_body.velocity = l_velocity;
+                            l_body.angularVelocity = Vector3.zero;
+                        }
+
+                        foreach(Collider l_collider in m_colliders)
+                            l_collider.enabled = true;
+
+                        m_downTime = 0f;
+
+                        m_enabled = true;
                     }
                 }
                 else
                 {
-                    foreach(Rigidbody l_body in m_rigidBodies)
-                        l_body.isKinematic = true;
-
-                    if(!Settings.RestorePosition && (m_puppetReferences.hips != null))
+                    if(IsSafeToUnragdoll())
                     {
-                        Vector3 l_pos = m_puppetReferences.hips.position;
-                        PlayerSetup.Instance.transform.position = l_pos;
+                        MovementSystem.Instance.SetImmobilized(false);
+                        m_ragdolledParameter.SetValue(false);
+                        if(BodySystem.isCalibratedAsFullBody)
+                            BodySystem.TrackingPositionWeight = 1f;
+
+                        foreach(Rigidbody l_body in m_rigidBodies)
+                            l_body.isKinematic = true;
+
+                        if(m_puppetReferences.hips != null)
+                        {
+                            Vector3 l_hipsPos = m_puppetReferences.hips.position;
+
+                            if(!Settings.RestorePosition)
+                            {
+                                if(Utils.IsInVR())
+                                {
+                                    Vector3 l_diff = l_hipsPos - PlayerSetup.Instance._avatar.transform.position;
+                                    Vector3 l_playerPos = PlayerSetup.Instance.transform.position;
+                                    PlayerSetup.Instance.transform.position = l_playerPos + l_diff;
+                                }
+                                else
+                                    PlayerSetup.Instance.transform.position = l_hipsPos;
+                            }
+                        }
+
+                        foreach(Collider l_collider in m_colliders)
+                            l_collider.enabled = false;
+
+                        m_lastPosition = PlayerSetup.Instance.transform.position;
+                        m_velocity = Vector3.zero;
+                        m_downTime = float.MinValue;
+
+                        m_enabled = false;
                     }
                 }
-
-                foreach(Collider l_collider in m_colliders)
-                    l_collider.enabled = m_enabled;
             }
         }
+
+        public bool IsRagdolled() => (m_enabled && m_avatarReady);
 
         static Transform CloneTransform(Transform p_source, Transform p_parent, string p_name)
         {
@@ -244,6 +432,21 @@ namespace ml_prm
             l_target.parent = p_parent;
             p_source.CopyGlobal(l_target);
             return l_target;
+        }
+
+        static bool IsSafeToRagdoll()
+        {
+            bool l_result = true;
+            l_result &= !BodySystem.isCalibrating; // Not calibrating
+            l_result &= ((CombatSystem.Instance == null) || !CombatSystem.Instance.isDown); // Non-combat world or not dead
+            return l_result;
+        }
+
+        static bool IsSafeToUnragdoll()
+        {
+            bool l_result = true;
+            l_result &= ((CombatSystem.Instance == null) || !CombatSystem.Instance.isDown); // Non-combat world or not dead
+            return l_result;
         }
     }
 }

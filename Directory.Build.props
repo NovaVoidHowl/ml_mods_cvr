@@ -90,6 +90,10 @@
             <HintPath>$(MsBuildThisFileDirectory)\ManagedLibs\BTKUILib.dll</HintPath>
             <Private>False</Private>
         </Reference>
+        <Reference Include="ml_prm">
+            <HintPath>$(MsBuildThisFileDirectory)\ManagedLibs\ml_prm.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
         <Reference Include="Boxophobic.TheVehetationEngine.Runtime">
             <HintPath>$(MsBuildThisFileDirectory)\ManagedLibs\Boxophobic.TheVehetationEngine.Runtime.dll</HintPath>
             <Private>False</Private>

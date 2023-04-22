@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -54,6 +54,10 @@
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
+    <Reference Include="ml_prm">
+      <HintPath>D:\Games\Steam\steamapps\common\ChilloutVR\Mods\ml_prm.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Xml.Linq" />
@@ -77,6 +81,7 @@
   <ItemGroup>
     <Compile Include="AnimatorAnalyzer.cs" />
     <Compile Include="AvatarParameter.cs" />
+    <Compile Include="ModSupporter.cs" />
     <Compile Include="MotionTweaker.cs" />
     <Compile Include="Main.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
@@ -89,6 +94,6 @@
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <PropertyGroup>
-    <PostBuildEvent>copy /y "$(TargetPath)" "$(CVRPATH)\Mods\"</PostBuildEvent>
+     <PostBuildEvent>copy /y "$(TargetPath)" "$(CVRPATH)\Mods\"</PostBuildEvent>
   </PropertyGroup>
 </Project>

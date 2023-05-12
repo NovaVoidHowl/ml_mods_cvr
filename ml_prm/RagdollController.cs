@@ -28,6 +28,7 @@ namespace ml_prm
         Transform m_puppet = null;
         BipedRagdollReferences m_puppetReferences;
         readonly List<System.Tuple<Transform, Transform>> m_boneLinks = null;
+        readonly List<System.Tuple<CharacterJoint, Vector3>> m_jointAnchors = null;
 
         bool m_avatarReady = false;
         Vector3 m_lastPosition = Vector3.zero;
@@ -50,6 +51,7 @@ namespace ml_prm
             m_rigidBodies = new List<Rigidbody>();
             m_colliders = new List<Collider>();
             m_boneLinks = new List<System.Tuple<Transform, Transform>>();
+            m_jointAnchors = new List<System.Tuple<CharacterJoint, Vector3>>();
 
             m_physicsMaterial = new PhysicMaterial("Ragdoll");
             m_physicsMaterial.dynamicFriction = 0.5f;
@@ -118,7 +120,7 @@ namespace ml_prm
             if(m_avatarReady && !m_reachedGround)
                 m_reachedGround = MovementSystem.Instance.IsGrounded();
 
-            if(m_avatarReady && m_enabled && BodySystem.isCalibratedAsFullBody && !BodySystem.isCalibrating)
+            if(m_avatarReady && m_enabled && !BodySystem.isCalibrating)
                 BodySystem.TrackingPositionWeight = 0f;
 
             if(m_avatarReady && m_enabled && Settings.AutoRecover)
@@ -131,32 +133,45 @@ namespace ml_prm
                 }
             }
 
-            if(Settings.Hotkey && Input.GetKeyDown(KeyCode.R) && !ViewManager.Instance.isGameMenuOpen())
-                SwitchRagdoll();
-
             if((m_avatarRagdollToggle != null) && m_avatarRagdollToggle.isActiveAndEnabled && m_avatarRagdollToggle.shouldOverride && (m_enabled != m_avatarRagdollToggle.isOn))
                 SwitchRagdoll();
 
             if((m_customTrigger != null) && m_customTrigger.GetStateWithReset() && m_avatarReady && !m_enabled && Settings.PointersReaction)
                 SwitchRagdoll();
+
+            if(Settings.Hotkey && Input.GetKeyDown(KeyCode.R) && !ViewManager.Instance.isGameMenuOpen())
+                SwitchRagdoll();
+
+            if(m_avatarReady && m_enabled && CVRInputManager.Instance.jump && Settings.JumpRecover)
+                SwitchRagdoll();
         }
 
         void LateUpdate()
         {
-            if(m_avatarReady && m_enabled && !BodySystem.isCalibrating)
+            if(m_avatarReady)
             {
-                if(BodySystem.isCalibratedAsFullBody)
-                    BodySystem.TrackingPositionWeight = 0f;
+                if(m_enabled)
+                {
+                    if(!BodySystem.isCalibrating)
+                    {
+                        BodySystem.TrackingPositionWeight = 0f;
 
-                foreach(var l_link in m_boneLinks)
-                    l_link.Item1.CopyGlobal(l_link.Item2);
+                        foreach(var l_link in m_boneLinks)
+                            l_link.Item1.CopyGlobal(l_link.Item2);
+                    }
+                }
+                else
+                {
+                    foreach(var l_link in m_boneLinks)
+                        l_link.Item2.CopyGlobal(l_link.Item1);
+                }
             }
         }
 
         // Game events
         internal void OnAvatarClear()
         {
-            if(m_enabled)
+            if(m_enabled && (MovementSystem.Instance != null))
                 MovementSystem.Instance.SetImmobilized(false);
 
             if(m_puppet != null)
@@ -172,8 +187,10 @@ namespace ml_prm
             m_colliders.Clear();
             m_puppetReferences = new BipedRagdollReferences();
             m_boneLinks.Clear();
+            m_jointAnchors.Clear();
             m_reachedGround = true;
             m_downTime = float.MinValue;
+            m_puppetRoot.localScale = Vector3.one;
         }
 
         internal void OnAvatarSetup()
@@ -244,6 +261,7 @@ namespace ml_prm
                         {
                             l_joint.enablePreprocessing = false;
                             l_joint.enableProjection = true;
+                            m_jointAnchors.Add(System.Tuple.Create(l_joint, l_joint.connectedAnchor));
                         }
 
                         Collider l_collider = l_puppetTransforms[i].GetComponent<Collider>();
@@ -266,6 +284,7 @@ namespace ml_prm
                 // And return back
                 m_puppetRoot.localPosition = Vector3.zero;
                 m_puppetRoot.localRotation = Quaternion.identity;
+                m_puppetRoot.gameObject.SetActive(false);
 
                 m_vrIK = PlayerSetup.Instance._avatar.GetComponent<VRIK>();
                 if(m_vrIK != null)
@@ -278,6 +297,16 @@ namespace ml_prm
                 m_ragdolledParameter = new AvatarBoolParameter("Ragdolled", PlayerSetup.Instance.animatorManager);
 
                 m_avatarReady = true;
+            }
+        }
+
+        internal void OnAvatarScaling(float p_scaleDifference)
+        {
+            if(m_avatarReady)
+            {
+                m_puppetRoot.localScale = Vector3.one * p_scaleDifference;
+                foreach(var l_pair in m_jointAnchors)
+                    l_pair.Item1.connectedAnchor = l_pair.Item2 * p_scaleDifference;
             }
         }
 
@@ -328,6 +357,11 @@ namespace ml_prm
         {
             if(m_enabled)
                 m_vrIK.solver.IKPositionWeight = m_vrIkWeight;
+            else
+            {
+                foreach(var l_link in m_boneLinks)
+                    l_link.Item2.CopyGlobal(l_link.Item1);
+            }
         }
 
         // Settings
@@ -413,15 +447,13 @@ namespace ml_prm
                         MovementSystem.Instance.SetImmobilized(true);
                         PlayerSetup.Instance.animatorManager.SetAnimatorParameterTrigger("CancelEmote");
                         m_ragdolledParameter.SetValue(true);
-                        if(BodySystem.isCalibratedAsFullBody)
+                        if(!BodySystem.isCalibrating)
                             BodySystem.TrackingPositionWeight = 0f;
 
                         if(!Utils.IsWorldSafe())
                             m_reachedGround = false; // Force player to unragdoll and reach ground first
 
-                        // Copy before set to non-kinematic to reduce stacked forces
-                        foreach(var l_link in m_boneLinks)
-                            l_link.Item2.CopyGlobal(l_link.Item1);
+                        m_puppetRoot.gameObject.SetActive(true);
 
                         foreach(Rigidbody l_body in m_rigidBodies)
                             l_body.isKinematic = false;
@@ -454,8 +486,10 @@ namespace ml_prm
                     {
                         MovementSystem.Instance.SetImmobilized(false);
                         m_ragdolledParameter.SetValue(false);
-                        if(BodySystem.isCalibratedAsFullBody)
+                        if(!BodySystem.isCalibrating)
                             BodySystem.TrackingPositionWeight = 1f;
+
+                        m_puppetRoot.gameObject.SetActive(false);
 
                         foreach(Rigidbody l_body in m_rigidBodies)
                             l_body.isKinematic = true;
@@ -466,6 +500,9 @@ namespace ml_prm
 
                         foreach(Collider l_collider in m_colliders)
                             l_collider.enabled = false;
+
+                        if(m_vrIK != null)
+                            m_vrIK.solver.Reset();
 
                         m_lastPosition = PlayerSetup.Instance.transform.position;
                         m_velocity = Vector3.zero;

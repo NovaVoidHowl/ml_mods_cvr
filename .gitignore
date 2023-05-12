@@ -1,0 +1,10 @@
+ManagedLibs/*.dll
+ManagedLibs/*.db
+NStrip.exe
+obj/
+bin/
+/.vscode
+/.vs
+.idea/
+/ml_prm/vendor/RootMotion/PuppetMaster
+/ml_prm/vendor/RootMotion/RagdollManager
